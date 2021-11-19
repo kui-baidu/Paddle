@@ -33,7 +33,7 @@ from . import topology as tp
 from .topology import ParallelMode
 from ..meta_parallel import TensorParallel, model_parallel_random_seed
 from ..meta_parallel import PipelineParallel, ShardingParallel
-from ..meta_optimizers import HybridParallelOptimizer
+from ..meta_optimizers import HybridParallelOptimizer, HeterParallelOptimizer
 from paddle import _C_ops
 from paddle.fluid import core
 from paddle.fluid.dygraph import to_variable
@@ -55,10 +55,10 @@ def apply_ir_passes(main_program, startup_program, config):
     fuse_all_reduce = config._user_defined_strategy.fuse_all_reduce_ops
     if fuse_all_reduce and build_strategy.fuse_all_optimizer_ops:
         # FIXME(zjl): currently, fuse_all_optimizer_ops
-        # have conflict with fuse_all_reduce_ops because 
-        # RawProgramOptimizer also inserts coalesce_tensor 
-        # into program. These two procedures may conflict  
-        # in which vars are to be fused. 
+        # have conflict with fuse_all_reduce_ops because
+        # RawProgramOptimizer also inserts coalesce_tensor
+        # into program. These two procedures may conflict
+        # in which vars are to be fused.
         warnings.warn(
             'Currently, the fuse_all_optimizer_ops pass has conflict with fuse_all_reduce_ops pass. Disable the fuse_all_optimizer_ops pass temporarily.'
         )
@@ -176,13 +176,13 @@ class Fleet(object):
 
         Args:
             role_maker (RoleMakerBase, optional): A ``RoleMakerBase`` containing the configuration
-                of environment variables related to distributed training.If you did not initialize 
+                of environment variables related to distributed training.If you did not initialize
                 the rolemaker by yourself, it will be automatically initialized to PaddleRoleMaker.
                 The default value is None.
-            is_collective (Boolean, optional): A ``Boolean`` variable determines whether the program 
+            is_collective (Boolean, optional): A ``Boolean`` variable determines whether the program
                 runs on the CPU or GPU. False means set distributed training using CPU, and True means
                 GPU.The default value is False.The default value is False.
-            strategy (DistributedStrategy): Extra properties for distributed training. 
+            strategy (DistributedStrategy): Extra properties for distributed training.
                 For details, please refer to paddle.distributed.fleet.DistributedStrategy. Default: None.
 
 
@@ -277,13 +277,15 @@ class Fleet(object):
                         self._user_defined_strategy.nccl_comm_num)
                 paddle.distributed.init_parallel_env()
 
-            # init hybrid parallel environment in dygraph
-            if tp._HYBRID_PARALLEL_GROUP is None:
-                self._init_hybrid_parallel_env()
-            else:
-                warnings.warn(
-                    "The dygraph hybrid parallel environment has been initialized."
-                )
+            # hybrid parallel not support for npu/xpu
+            if self._user_defined_strategy.heter_ccl_mode == False:
+                # init hybrid parallel environment in dygraph
+                if tp._HYBRID_PARALLEL_GROUP is None:
+                    self._init_hybrid_parallel_env()
+                else:
+                    warnings.warn(
+                        "The dygraph hybrid parallel environment has been initialized."
+                    )
         elif self._is_collective:
             use_sharding = self._user_defined_strategy.sharding
 
@@ -708,7 +710,7 @@ class Fleet(object):
 
                 # build net
                 # fleet.distributed_optimizer(...)
-                dataset = "" 
+                dataset = ""
                 if fleet.is_heter_worker():
                     fleet.run_heter_worker(dataset)
 
@@ -902,10 +904,10 @@ class Fleet(object):
 
         Args:
             optimizer(Optimizer): The executor to run for init server.
-            strategy(DistributedStrategy): Extra properties for distributed optimizer. 
+            strategy(DistributedStrategy): Extra properties for distributed optimizer.
                 It is recommended to use DistributedStrategy in fleet.init(). The strategy
-                here is for compatibility. If the strategy in fleet.distributed_optimizer() 
-                is not None, then it will overwrite the DistributedStrategy in fleet.init(), 
+                here is for compatibility. If the strategy in fleet.distributed_optimizer()
+                is not None, then it will overwrite the DistributedStrategy in fleet.init(),
                 which will take effect in distributed training.
 
         Returns:
@@ -939,8 +941,12 @@ class Fleet(object):
 
         if paddle.fluid.framework.in_dygraph_mode():
             if self.worker_num() > 1:
-                return HybridParallelOptimizer(optimizer, self._hcg,
-                                               self._user_defined_strategy)
+                if self._user_defined_strategy.heter_ccl_mode == False:
+                    return HybridParallelOptimizer(optimizer, self._hcg,
+                                                   self._user_defined_strategy)
+                else:
+                    return HeterParallelOptimizer(optimizer,
+                                                  self._user_defined_strategy)
             else:
                 return optimizer
         return self
@@ -1005,6 +1011,17 @@ class Fleet(object):
         if self.worker_num() <= 1:
             return model
 
+        if self._user_defined_strategy.heter_ccl_mode == True:
+            distributed_model = paddle.DataParallel(
+                model,
+                comm_buffer_size=self._user_defined_strategy.
+                fuse_grad_size_in_MB,
+                last_comm_buffer_size=self._user_defined_strategy.
+                last_comm_group_size_MB,
+                find_unused_parameters=self._user_defined_strategy.
+                find_unused_parameters)
+            return distributed_model
+
         if self._hcg.get_parallel_mode() == ParallelMode.SHARDING_PARALLEL:
             distributed_model = ShardingParallel(
                 model, self._hcg, strategy=self._user_defined_strategy)
@@ -1040,7 +1057,7 @@ class Fleet(object):
         Get state dict information from optimizer.
         (Only work in dygraph mode)
 
-        Returns: 
+        Returns:
             state_dict(dict) : dict contains all the Tensor used by optimizer
 
         Examples:
@@ -1071,7 +1088,7 @@ class Fleet(object):
         Load optimizer state dict.
         (Only work in dygraph mode)
 
-        Args: 
+        Args:
             state_dict(dict) : Dict contains all the Tensor needed by optimizer
 
         Returns:
@@ -1105,14 +1122,14 @@ class Fleet(object):
     @dygraph_only
     def set_lr(self, value):
         """
-        Set the value of the learning rate manually in the optimizer. 
+        Set the value of the learning rate manually in the optimizer.
         (Only work in dygraph mode)
 
         Args:
             value (float|Tensor): the value of learning rate
 
-        Returns: 
-            None 
+        Returns:
+            None
 
         Examples:
             .. code-block:: python
@@ -1244,7 +1261,7 @@ class Fleet(object):
         Clear the gradients of all optimized parameters for model.
         (Only work in dygraph mode)
 
-        Returns: 
+        Returns:
             None
 
         Examples:
@@ -1323,14 +1340,14 @@ class Fleet(object):
                  use_fp16_test=False):
         """
         Init the amp training, such as cast fp32 parameters to fp16 type.
-  
+
         Args:
-            place(CUDAPlace): place is used to initialize 
+            place(CUDAPlace): place is used to initialize
                 fp16 parameters with fp32 values.
             scope(Scope): The scope is used to find fp32 parameters.
             test_program(Program): The program is used for testing.
             use_fp16_test(bool): Whether to use fp16 testing.
-            
+
         Examples:
             .. code-block:: python
 
@@ -1352,7 +1369,7 @@ class Fleet(object):
                         loss = paddle.mean(hidden)
                     # 2) Create the optimizer and set `multi_precision` to True.
                     # Setting `multi_precision` to True can avoid the poor accuracy
-                    # or the slow convergence in a way. 
+                    # or the slow convergence in a way.
                     optimizer = paddle.optimizer.Momentum(learning_rate=0.01, multi_precision=True)
                     # 3) These ops in `custom_black_list` will keep in the float32 computation type.
                     amp_list = paddle.static.amp.CustomOpLists(
@@ -1372,9 +1389,9 @@ class Fleet(object):
                     # 5) Use `amp_init` after FP32 parameters initialization(such as `exe.run(startup_program)`).
                     # If you want to perform the testing process, you should pass `test_program` into `amp_init`.
                     optimizer.amp_init(place, scope=paddle.static.global_scope())
-                    
+
                 if paddle.is_compiled_with_cuda() and len(paddle.static.cuda_places()) > 0:
-                    run_example_code()       
+                    run_example_code()
         """
         amp_optimizer = self._get_amp_optimizer()
         return amp_optimizer.amp_init(place, scope, test_program, use_fp16_test)
@@ -1658,8 +1675,8 @@ class Fleet(object):
             self._found_inf = 1 if temp_found_inf_fp16 or temp_found_inf_fp32 else 0
             is_found_inf = paddle.to_tensor([self._found_inf], dtype="int32")
 
-            # TODO(shenliang03) Since dp allreduce in the optimizer is 
-            # after the gradscaler, check_finite needs to synchronize global 
+            # TODO(shenliang03) Since dp allreduce in the optimizer is
+            # after the gradscaler, check_finite needs to synchronize global
             # information. In the future, we should use check_group to speed.
             paddle.distributed.all_reduce(
                 is_found_inf, op=paddle.distributed.ReduceOp.MAX, group=None)

@@ -107,9 +107,9 @@ see: http://www.paddlepaddle.org/documentation/docs/zh/1.6/user_guides/howto/tra
     base_group.add_argument(
         "--backend",
         type=str,
-        default="auto",
-        help="Specifize the backend, can be gloo|nccl|bkcl|auto. Default value is auto which perfers nccl or bkcl."
-    )
+        default=os.environ.get('PADDLE_DISTRI_BACKEND', 'auto'),
+        help="Specifize the backend, can be gloo|nccl|bkcl|auto|hccl|heter. "
+        "Default value is auto which perfers nccl or bkcl.")
     base_group.add_argument(
         "--nproc_per_node",
         type=int,
@@ -144,6 +144,16 @@ see: http://www.paddlepaddle.org/documentation/docs/zh/1.6/user_guides/howto/tra
             "--xpus=\"0,1,2,3\" will launch four training processes each bound to one xpu."
         )
         base_group.add_argument("--selected_xpus", dest="xpus")
+
+    if fluid.core.is_compiled_with_npu():
+        base_group.add_argument(
+            "--npus",
+            type=str,
+            default=None,
+            help="It's for xpu training. For example: "
+            "--npus=\"0,1,2,3\" will launch four training processes each bound to one npu."
+        )
+        base_group.add_argument("--selected_npus", dest="npus")
 
     base_group.add_argument(
         "training_script",
@@ -297,22 +307,21 @@ def launch_collective(args):
     # lazy launch for auto-parallel
     if args.enable_auto_mapping == True:
         cluster, pod = get_mapped_cluster_from_args(args, device_mode)
-    else:
+    elif cloud_utils.use_paddlecloud() and trainers_num != 1:
+        cluster, pod = cloud_utils.get_cloud_cluster(
+            args.ips, device_mode, devices_per_proc, start_port)
+        logger.debug("get cluster from cloud:{}".format(cluster))
+    elif device_mode == DeviceMode.ASCEND_NPU:
         # for ascend
-        if device_mode == DeviceMode.ASCEND_NPU:
-            cluster, pod = ascend_utils.get_cloud_cluster(
-                rank_table_file=os.getenv("RANK_TABLE_FILE", None),
-                device_mode=device_mode,
-                start_port=start_port)
-        elif cloud_utils.use_paddlecloud() and trainers_num != 1:
-            cluster, pod = cloud_utils.get_cloud_cluster(
-                args.ips, device_mode, devices_per_proc, start_port)
-            logger.debug("get cluster from cloud:{}".format(cluster))
-        else:
-            # trainers_num = 1 or not use paddlecloud ips="a,b"
-            cluster, pod = get_cluster_from_args(args, device_mode,
-                                                 devices_per_proc)
-            logger.debug("get cluster from args:{}".format(cluster))
+        cluster, pod = ascend_utils.get_cloud_cluster(
+            rank_table_file=os.getenv("RANK_TABLE_FILE", None),
+            device_mode=device_mode,
+            start_port=start_port)
+    else:
+        # trainers_num = 1 or not use paddlecloud ips="a,b"
+        cluster, pod = get_cluster_from_args(args, device_mode,
+                                             devices_per_proc)
+        logger.debug("get cluster from args:{}".format(cluster))
 
     global_envs = copy.copy(os.environ.copy())
     gloo_rendezvous_dir = tempfile.mkdtemp()
@@ -320,6 +329,8 @@ def launch_collective(args):
     global_envs["PADDLE_WITH_GLOO"] = str(os.getenv("PADDLE_WITH_GLOO", "0"))
     global_envs["PADDLE_GLOO_RENDEZVOUS"] = "3"
     global_envs["PADDLE_GLOO_FS_PATH"] = gloo_rendezvous_dir
+    # NOTE(liubo48): add whitelist disable env to fix hcclGetRootInfo failure.
+    global_envs["HCCL_WHITELIST_DISABLE"] = "1"
     global_envs["PADDLE_DISTRI_BACKEND"] = args.backend
 
     procs = start_local_trainers(
@@ -413,8 +424,8 @@ def which_distributed_mode(args):
 
     if len(has_ps_args) > 1 and len(has_collective_args) > 1:
         raise ValueError(
-            "Only one mode(Collective or Parameter-Server) can be selected at the same time, but more than one configuration was received."
-        )
+            "Only one mode(Collective or Parameter-Server) can be selected at the same time, "
+            "but more than one configuration was received.")
 
     if fluid.core.is_compiled_with_cuda():
         accelerators = fluid.core.get_cuda_device_count()
@@ -443,22 +454,22 @@ def which_distributed_mode(args):
         ) and not fluid.core.is_compiled_with_xpu():
             if args.servers:
                 logger.warning(
-                    "Not found distinct arguments and not compiled with cuda or xpu. \
-But found args.servers not empty, default use ps mode")
+                    "Not found distinct arguments and not compiled with cuda or xpu or npu. "
+                    "But found args.servers not empty, default use ps mode")
                 return DistributeMode.PS
             else:
                 return DistributeMode.COLLECTIVE
         else:
             logger.warning(
-                "Not found distinct arguments and compiled with cuda or xpu. Default use collective mode"
-            )
+                "Not found distinct arguments and compiled with cuda or xpu or npu. "
+                "Default use collective mode")
             return DistributeMode.COLLECTIVE
 
 
 def launch():
     """
     Paddle distribution training entry ``python -m paddle.distributed.launch``.
-    
+
     Usage:
         .. code-block:: bash
             :name: code-block-bash1
@@ -468,7 +479,7 @@ def launch():
                              [--worker_num WORKER_NUM] [--server_num SERVER_NUM] [--heter_worker_num HETER_WORKER_NUM]
                              [--http_port HTTP_PORT] [--elastic_server ELASTIC_SERVER] [--job_id JOB_ID] [--np NP] [--scale SCALE]
                              [--host HOST] [--force FORCE]
-                             training_script ...    
+                             training_script ...
 
 
     Base Parameters:
@@ -481,9 +492,9 @@ def launch():
         - ``--gpus``: It's for gpu training. e.g., ``--gpus=0,1,2,3`` will launch four training processes each bound to one gpu.
 
         - ``--selected_gpus``: gpus aliases, recommend to use ``--gpus``.
-        
+
         - ``--xpus``: It's for xpu training if xpu is available. e.g., ``--xpus=0,1,2,3``.
-        
+
         - ``--selected_xpus``: xpus aliases, recommend to use ``--xpus``.
 
         - ``training_script``: The full path to the single GPU training program/script to be launched in parallel, followed by all the arguments for the training script. e.g., ``traing.py``
@@ -505,7 +516,7 @@ def launch():
         - ``--server_num``: Number of servers (It recommend to set when in the emulated distributed environment using single node)
 
         - ``--heter_worker_num``: Number of heter_workers in each stage (It recommend to set when in the emulated distributed environment using single node)
-        
+
         - ``--heter_devices``: Type of heter_device in each stage
 
         - ``--http_port``: Gloo http Port
@@ -526,18 +537,18 @@ def launch():
     Examples 1 (collective, single node):
         .. code-block:: bash
             :name: code-block-example-bash1
-            
+
             # For training on single node using 4 gpus.
 
             python -m paddle.distributed.launch --gpus=0,1,2,3 train.py --lr=0.01
-        
+
     Examples 2 (collective, multi node):
         .. code-block:: bash
             :name: code-block-example-bash2
 
             # The parameters of --gpus and --ips must be consistent in each node.
 
-            # For training on multiple nodes, e.g., 192.168.0.16, 192.168.0.17 
+            # For training on multiple nodes, e.g., 192.168.0.16, 192.168.0.17
 
             # On 192.168.0.16:
 
@@ -545,15 +556,15 @@ def launch():
 
             # On 192.168.0.17:
             python -m paddle.distributed.launch --gpus=0,1,2,3 --ips=192.168.0.16,192.168.0.17 train.py --lr=0.01
-        
+
     Examples 3 (ps, cpu, single node):
         .. code-block:: bash
             :name: code-block-example-bash3
 
             # To simulate distributed environment using single node, e.g., 2 servers and 4 workers.
-            
+
             python -m paddle.distributed.launch --server_num=2 --worker_num=4 train.py --lr=0.01
-        
+
     Examples 4 (ps, cpu, multi node):
         .. code-block:: bash
             :name: code-block-example-bash4
@@ -573,10 +584,10 @@ def launch():
             :name: code-block-example-bash5
 
            # To simulate distributed environment using single node, e.g., 2 servers and 4 workers, each worker use single gpu.
-            
+
             export CUDA_VISIBLE_DEVICES=0,1,2,3
             python -m paddle.distributed.launch --server_num=2 --worker_num=4 train.py --lr=0.01
-            
+
     Examples 6 (ps, gpu, multi node):
         .. code-block:: bash
             :name: code-block-example-bash6
@@ -598,10 +609,10 @@ def launch():
             :name: code-block-example-bash7
 
             # To simulate distributed environment using single node, e.g., 2 servers and 4 workers, two workers use gpu, two workers use cpu.
-            
+
             export CUDA_VISIBLE_DEVICES=0,1
             python -m paddle.distributed.launch --server_num=2 --worker_num=2 --heter_worker_num=2 train.py --lr=0.01
-            
+
     Examples 8 (ps-heter, cpu + gpu, multi node):
         .. code-block:: bash
             :name: code-block-example-bash8
@@ -623,7 +634,7 @@ def launch():
             :name: code-block-example-bash9
 
             python -m paddle.distributed.launch --elastic_server=127.0.0.1:2379 --np=2 --job_id=job1  --gpus=0,1,2,3 train.py
-        
+
     """
 
     args = _parse_args()
@@ -631,10 +642,13 @@ def launch():
     _print_arguments(args)
 
     if args.backend == 'auto':
-        distribute_mode = which_distributed_mode(
-            args)  # which_distributed_mode must modify args.backend
+        distribute_mode = which_distributed_mode(args)
+        assert args.backend in [
+            'gloo', 'nccl', 'bkcl', 'hccl'
+        ]  # which_distributed_mode must modify args.backend
     else:
-        assert args.run_mode == 'collective' or args.run_mode == None, "When backend is not 'auto', run mode must be collective"
+        assert args.run_mode == 'collective' or args.run_mode == None, \
+            "When backend is not 'auto', run mode must be collective."
         check_backend(args.backend)
         distribute_mode = DistributeMode.COLLECTIVE
 
