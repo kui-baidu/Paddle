@@ -50,10 +50,8 @@ class HCCLParallelContext : public ParallelContext {
                          framework::Variable* dst, int ring_id,
                          bool use_calc_stream) override;
 
-  void InterReduce(const framework::Variable& src, framework::Variable* dst,
-                   int ring_id) override;
-
-  void InterBroadCast(framework::Variable* src, int ring_id) override;
+  void BroadCastByStream(framework::Variable* src, int ring_id,
+                         bool use_calc_stream) override;
 
   paddle::platform::DeviceContext* GetDeviceContext(int ring_id) override;
 

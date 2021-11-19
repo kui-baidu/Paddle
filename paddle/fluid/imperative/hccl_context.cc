@@ -153,37 +153,8 @@ void HCCLParallelContext::AllReduceByStream(const framework::Variable &src,
   }
 }
 
-void HCCLParallelContext::InterReduce(const framework::Variable &src,
-                                      framework::Variable *dst, int ring_id) {
-  VLOG(3) << "/// DEBUG /// start inter reduce with ring_id: " << ring_id;
-  if (src.IsType<framework::LoDTensor>()) {
-    const framework::Tensor &src_tensor = src.Get<framework::LoDTensor>();
-    framework::Tensor *dst_tensor = dst->GetMutable<framework::LoDTensor>();
-
-    const auto &place = src_tensor.place();
-    platform::HCCLComm *comm =
-        platform::HCCLCommContext::Instance().Get(ring_id, place);
-    aclrtStream stream = comm->stream();
-    // no Reduce, use AllReduce instead
-    AllReduce(src_tensor, dst_tensor, stream, comm);
-    if (comm->rank() != 0) {
-      auto npu_place = BOOST_GET_CONST(platform::NPUPlace, place);
-      memory::Copy(
-          npu_place, reinterpret_cast<void *>(dst_tensor->data<float>()),
-          npu_place, reinterpret_cast<void *>(
-                         const_cast<float *>(src_tensor.data<float>())),
-          src_tensor.numel() * sizeof(float), stream);
-    }
-  } else {
-    PADDLE_THROW(platform::errors::InvalidArgument(
-        "Unsupported variable type %s for imperative allreduce, only "
-        "LoDTensor is supported.",
-        platform::demangle(framework::ToTypeName(src.Type()))));
-  }
-}
-
-void HCCLParallelContext::InterBroadCast(framework::Variable *src,
-                                         int ring_id) {
+void HCCLParallelContext::BroadCastByStream(framework::Variable *src,
+                                            int ring_id, bool use_calc_stream) {
   VLOG(3) << "/// DEBUG /// start inter broadcast with ring_id: " << ring_id;
   if (src->IsType<framework::LoDTensor>()) {
     framework::Tensor *src_tensor = src->GetMutable<framework::LoDTensor>();

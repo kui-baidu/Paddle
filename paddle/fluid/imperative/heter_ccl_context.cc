@@ -161,7 +161,7 @@ void HeterParallelContext::AllReduceByStream(const framework::Variable &src,
                                              bool use_calc_stream) {
   // step 1: call reduce within node
   VLOG(3) << "/// DEBUG /// step 1: reduce within node... ";
-  heter_parallel_ctx_->InterReduce(src, dst, 1);
+  heter_parallel_ctx_->AllReduceByStream(src, dst, 1, false);
   heter_parallel_ctx_->WaitComm(1);
 
   // step 2: call allreduce between nodes with gloo
@@ -202,20 +202,15 @@ void HeterParallelContext::AllReduceByStream(const framework::Variable &src,
 
   // step 3: call broadcast within node
   VLOG(3) << "/// DEBUG /// step 3: broadcast within node... ";
-  heter_parallel_ctx_->InterBroadCast(dst, 1);
+  heter_parallel_ctx_->BroadCastByStream(dst, 1);
   heter_parallel_ctx_->WaitComm(1);
 }
 
-void HeterParallelContext::InterReduce(const framework::Variable &src,
-                                       framework::Variable *dst, int ring_id) {
+void HeterParallelContext::BroadCastByStream(framework::Variable *src,
+                                             int ring_id,
+                                             bool use_calc_stream) {
   PADDLE_THROW(platform::errors::Unimplemented(
-      "Unimplemented InterReduce from heter ctx."));
-}
-
-void HeterParallelContext::InterBroadCast(framework::Variable *src,
-                                          int ring_id) {
-  PADDLE_THROW(platform::errors::Unimplemented(
-      "Unimplemented InterBroadCast from heter ctx."));
+      "Unimplemented BroadCastByStream from heter ctx."));
 }
 
 paddle::platform::DeviceContext *HeterParallelContext::GetDeviceContext(
