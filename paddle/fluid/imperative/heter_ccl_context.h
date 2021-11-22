@@ -55,8 +55,7 @@ class HeterParallelContext : public ParallelContext {
                          framework::Variable* dst, int ring_id,
                          bool use_calc_stream) override;
 
-  void BroadCastByStream(framework::Variable* src, int ring_id,
-                         bool use_calc_stream) override;
+  void BroadCast(framework::Variable* src, int ring_id) override;
 
   paddle::platform::DeviceContext* GetDeviceContext(int ring_id) override;
 
@@ -67,12 +66,11 @@ class HeterParallelContext : public ParallelContext {
   void SynchronizeCompute() override;
 
  private:
-  ParallelStrategy gloo_strategy_;
+  ParallelStrategy inter_strategy_;
   ParallelStrategy node_strategy_;
   platform::Place node_place_;
-  std::unordered_set<std::string> nodes_ips_;
-  std::shared_ptr<imperative::ParallelContext> heter_parallel_ctx_{nullptr};
-  std::shared_ptr<imperative::ParallelContext> gloo_ctx_{nullptr};
+  std::shared_ptr<imperative::ParallelContext> node_parallel_ctx_{nullptr};
+  std::shared_ptr<imperative::ParallelContext> inter_parallel_ctx_{nullptr};
 };
 
 }  //  namespace imperative

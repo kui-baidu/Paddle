@@ -35,7 +35,6 @@ imperative::ParallelStrategy GetStrategy(int local_rank) {
   strategy.trainer_endpoints_ = eps;
   strategy.current_endpoint_ = eps[local_rank];
   strategy.nranks_ = 2;
-  strategy.local_nranks_ = 2;
   strategy.local_rank_ = local_rank;
   return strategy;
 }

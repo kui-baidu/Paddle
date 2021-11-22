@@ -176,8 +176,7 @@ void GLOOParallelContext::AllReduce(const framework::SelectedRows &src,
   }
 }
 
-void GLOOParallelContext::BroadCastByStream(framework::Variable *src,
-                                            int ring_id, bool use_calc_stream) {
+void GLOOParallelContext::BroadCast(framework::Variable *src, int ring_id) {
   PADDLE_THROW(platform::errors::Unimplemented(
       "Unimplemented inter-broadcast for CPU now."));
 }

@@ -50,101 +50,76 @@ HeterParallelContext::HeterParallelContext(const ParallelStrategy &strategy,
 {
   // construct node_strategy_ from global strategy by selecting the
   // endpoints with same ip address.
-  std::vector<std::string> global_eps = strategy_.trainer_endpoints_;
-  for (auto ep : global_eps) {
+  std::string node_ip = strategy_.current_endpoint_.substr(
+      0, strategy_.current_endpoint_.find(':'));
+  int node_nranks = 0;
+  int inter_rank = -1;
+
+  std::vector<std::string> all_eps = strategy_.trainer_endpoints_;
+  std::vector<std::string> inter_endpoints;
+  std::set<std::string> nodes_ips;
+  for (auto ep : all_eps) {
     std::string ip = ep.substr(0, ep.find(':'));
     // record ip of different nodes
-    nodes_ips_.emplace(ip);
+    if (nodes_ips.find(ip) != nodes_ips.end()) {
+      if (ep == strategy_.current_endpoint_) {
+        inter_rank = nodes_ips.size();
+      }
+      inter_endpoints.push_back(ep);
+      nodes_ips.emplace(ip);
+    }
+
+    if (ip == node_ip) {
+      if (ep == strategy_.current_endpoint_) {
+        node_strategy_.local_rank_ = node_nranks;
+      }
+      node_nranks++;
+      node_strategy_.trainer_endpoints_.push_back(ep);
+    }
   }
 
-  int local_nranks = strategy_.local_nranks_;
-  PADDLE_ENFORCE_NE(local_nranks, 0,
+  PADDLE_ENFORCE_NE(node_nranks, 0,
                     platform::errors::InvalidArgument(
                         "The number of local nranks should not be zero."));
-  // PADDLE_ENFORCE_GT(nodes_ips_.size(), 1,
-  //                   platform::errors::InvalidArgument(
-  //                       "The number of nodes should be greater than 1."
-  //                   ));
-  PADDLE_ENFORCE_EQ(
-      nodes_ips_.size() * strategy_.local_nranks_,
-      strategy_.trainer_endpoints_.size(),
-      platform::errors::InvalidArgument(
-          "The number of nodes times the number of cards "
-          "in each node should equal to the number of global trainers."));
-
-  node_strategy_.nranks_ = local_nranks;
-  node_strategy_.local_rank_ = strategy_.local_rank_ % local_nranks;
+  node_strategy_.nranks_ = node_nranks;
   node_strategy_.current_endpoint_ = strategy_.current_endpoint_;
 
-  if (nodes_ips_.size() == 1) {
-    // NOTE(liubo48): this branch is only used for unittest with single
-    // node.
-    node_strategy_.trainer_endpoints_ = strategy_.trainer_endpoints_;
-  } else {
-    // nodes with different ips
-    std::string curr_ep = strategy_.current_endpoint_;
-    std::string curr_ep_ip = paddle::string::Split(curr_ep, ':')[0];
-    for (auto ep : global_eps) {
-      std::string ip = paddle::string::Split(ep, ':')[0];
-      if (ip == curr_ep_ip) {
-        node_strategy_.trainer_endpoints_.push_back(ep);
-      }
-    }
-  }
-
-  // NOTE(liubo48): currently not support only one rank on each node.
-  PADDLE_ENFORCE_GT(node_strategy_.trainer_endpoints_.size(), 1,
-                    platform::errors::InvalidArgument(
-                        "In heter mode, the number of ranks on each node "
-                        "should be greater than 1."));
-
-  // construct gloo_strategy_ from global strategy by selecting the
-  // endpoints with local_rank which can be evenly divided by local_nranks_.
-  if ((nodes_ips_.size() > 1) && (strategy_.local_rank_ % local_nranks == 0)) {
-    gloo_strategy_.nranks_ = strategy_.nranks_ / local_nranks;
-    gloo_strategy_.local_rank_ = strategy_.local_rank_ / local_nranks;
-    gloo_strategy_.current_endpoint_ = strategy_.current_endpoint_;
-    for (size_t i = 0; i < strategy_.trainer_endpoints_.size(); i++) {
-      if (i % local_nranks == 0) {
-        gloo_strategy_.trainer_endpoints_.push_back(
-            strategy_.trainer_endpoints_[i]);
-      }
-    }
-    gloo_ctx_ = std::make_shared<GLOOParallelContext>(gloo_strategy_,
-                                                      platform::CPUPlace());
+  if (inter_rank >= 0) {
+    inter_strategy_.nranks_ = inter_endpoints.size();
+    inter_strategy_.local_rank_ = inter_rank;
+    inter_strategy_.current_endpoint_ = strategy_.current_endpoint_;
+    inter_strategy_.trainer_endpoints_ = inter_endpoints;
+    inter_parallel_ctx_ = std::make_shared<GLOOParallelContext>(
+        inter_strategy_, platform::CPUPlace());
   }
 
 #ifdef PADDLE_WITH_NCCL
   node_place_ = platform::CUDAPlace(device_id);
-  heter_parallel_ctx_ =
+  node_parallel_ctx_ =
       std::make_shared<NCCLParallelContext>(node_strategy_, node_place_);
 #endif
 #ifdef PADDLE_WITH_XPU_BKCL
   node_place_ = platform::XPUPlace(device_id);
-  heter_parallel_ctx_ =
+  node_parallel_ctx_ =
       std::make_shared<BKCLParallelContext>(node_strategy_, node_place_);
 #endif
 #ifdef PADDLE_WITH_ASCEND_CL
   node_place_ = platform::NPUPlace(device_id);
-  heter_parallel_ctx_ =
+  node_parallel_ctx_ =
       std::make_shared<HCCLParallelContext>(node_strategy_, node_place_);
 #endif
 }
 
 void HeterParallelContext::Init() {
   PADDLE_ENFORCE_NE(
-      heter_parallel_ctx_, nullptr,
+      node_parallel_ctx_, nullptr,
       platform::errors::Unavailable(
           "The heter parallel context has not been initialized."));
-  // NOTE(liubo48): call Init() to create ring_id(0) for parameters
-  // synchonization.
-  heter_parallel_ctx_->Init();
 
-  // create another ring for internal communication.
-  heter_parallel_ctx_->InitWithRingID(1);
+  node_parallel_ctx_->Init();
 
-  if (gloo_ctx_ != nullptr) {
-    gloo_ctx_->Init();
+  if (inter_parallel_ctx_ != nullptr) {
+    inter_parallel_ctx_->Init();
   }
 
   VLOG(3) << "/// DEBUG /// heter parallel env init done..." << std::endl;
@@ -160,78 +135,53 @@ void HeterParallelContext::AllReduceByStream(const framework::Variable &src,
                                              int ring_id,
                                              bool use_calc_stream) {
   // step 1: call reduce within node
-  VLOG(3) << "/// DEBUG /// step 1: reduce within node... ";
-  heter_parallel_ctx_->AllReduceByStream(src, dst, 1, false);
-  heter_parallel_ctx_->WaitComm(1);
+  VLOG(3) << "/// DEBUG /// step 1: reduce in node... ";
+  node_parallel_ctx_->AllReduceByStream(src, dst, ring_id, false);
+  node_parallel_ctx_->WaitComm(ring_id);
 
   // step 2: call allreduce between nodes with gloo
-  if (gloo_ctx_ != nullptr) {
-    auto gloo_ptr = paddle::framework::GlooWrapper::GetInstance();
-    PADDLE_ENFORCE_EQ(gloo_ptr->IsInitialized(), true,
-                      paddle::platform::errors::Unavailable(
-                          "Gloo context is not initialized."));
+  if (inter_parallel_ctx_ != nullptr) {
+    auto src_tensor = src.Get<framework::LoDTensor>();
+    framework::Variable src_cpu;
+    auto src_cpu_tensor = src_cpu.GetMutable<framework::LoDTensor>();
+    framework::TensorCopySync(src_tensor, platform::CPUPlace(), src_cpu_tensor);
 
-    auto src_dev_tensor = src.Get<framework::LoDTensor>();
-    auto *dst_dev_tensor = dst->GetMutable<framework::LoDTensor>();
-    dst_dev_tensor->Resize(src_dev_tensor.dims());
+    framework::Variable dst_cpu;
+    inter_parallel_ctx_->AllReduceByStream(src, &dst_cpu, ring_id, false);
 
-    // step 2.1: Dev Tensor to CPU Tensor
-    VLOG(3) << "/// DEBUG /// step 2.1: Dev Tensor to CPU Tensor... ";
-    framework::Tensor src_cpu_tensor;
-    framework::Tensor dst_cpu_tensor;
-    src_cpu_tensor.mutable_data<float>(src_dev_tensor.dims(),
-                                       platform::CPUPlace());
+    auto dst_cpu_tensor = dst_cpu.Get<framework::LoDTensor>();
+    auto dst_tensor = dst->GetMutable<framework::LoDTensor>();
+    framework::TensorCopySync(dst_cpu_tensor, src_cpu_tensor->place(),
+                              dst_tensor);
 
-    auto &place = src_dev_tensor.place();
-    auto cpu_place = new platform::CPUPlace();
-    framework::TensorCopySync(src_dev_tensor, *cpu_place, &src_cpu_tensor);
-
-    // step 2.2: call gloo->AllReduce between cpus of nodes
-    VLOG(3) << "/// DEBUG /// step 2.2: gloo allreduce between nodes... ";
-    std::vector<float> send_vector;
-    framework::TensorToVector<float>(src_cpu_tensor, &send_vector);
-    auto recv_vector = gloo_ptr->AllReduce<float>(send_vector);
-    framework::TensorFromVector<float>(recv_vector, &dst_cpu_tensor);
-
-    // step 2.3: CPU Tensor to Dev tensor
-    VLOG(3) << "/// DEBUG /// step 2.3: CPU Tensor to Dev tensor... ";
-    framework::TensorCopySync(dst_cpu_tensor, place, dst_dev_tensor);
-
-    gloo_ptr->Barrier();
+    inter_parallel_ctx_->WaitComm(ring_id);
   }
 
   // step 3: call broadcast within node
   VLOG(3) << "/// DEBUG /// step 3: broadcast within node... ";
-  heter_parallel_ctx_->BroadCastByStream(dst, 1);
-  heter_parallel_ctx_->WaitComm(1);
-}
-
-void HeterParallelContext::BroadCastByStream(framework::Variable *src,
-                                             int ring_id,
-                                             bool use_calc_stream) {
-  PADDLE_THROW(platform::errors::Unimplemented(
-      "Unimplemented BroadCastByStream from heter ctx."));
+  node_parallel_ctx_->BroadCast(dst, ring_id);
+  node_parallel_ctx_->WaitComm(ring_id);
 }
 
 paddle::platform::DeviceContext *HeterParallelContext::GetDeviceContext(
     int ring_id) {
   // directly call the implementation of target parallel ctx.
-  return heter_parallel_ctx_->GetDeviceContext(ring_id);
+  return node_parallel_ctx_->GetDeviceContext(ring_id);
 }
 
 void HeterParallelContext::WaitCompute(int ring_id) {
   // directly call the implementation of target parallel ctx.
-  heter_parallel_ctx_->WaitCompute(ring_id);
+  node_parallel_ctx_->WaitCompute(ring_id);
 }
 
 void HeterParallelContext::WaitComm(int ring_id) {
   // directly call the implementation of target parallel ctx.
-  heter_parallel_ctx_->WaitComm(ring_id);
+  node_parallel_ctx_->WaitComm(ring_id);
 }
 
 void HeterParallelContext::SynchronizeCompute() {
   // directly call the implementation of target parallel ctx.
-  heter_parallel_ctx_->SynchronizeCompute();
+  node_parallel_ctx_->SynchronizeCompute();
 }
 
 }  //  namespace imperative

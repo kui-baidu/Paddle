@@ -153,12 +153,10 @@ void HCCLParallelContext::AllReduceByStream(const framework::Variable &src,
   }
 }
 
-void HCCLParallelContext::BroadCastByStream(framework::Variable *src,
-                                            int ring_id, bool use_calc_stream) {
+void HCCLParallelContext::BroadCast(framework::Variable *src, int ring_id) {
   VLOG(3) << "/// DEBUG /// start inter broadcast with ring_id: " << ring_id;
   if (src->IsType<framework::LoDTensor>()) {
     framework::Tensor *src_tensor = src->GetMutable<framework::LoDTensor>();
-    const auto &place = src_tensor->place();
     platform::HCCLComm *comm =
         platform::HCCLCommContext::Instance().Get(ring_id, place);
     aclrtStream stream = comm->stream();

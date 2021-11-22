@@ -198,7 +198,6 @@ def init_parallel_env():
         warnings.warn("The parallel environment has been initialized.")
     strategy.nranks = parallel_env.world_size
     strategy.local_rank = parallel_env.rank
-    strategy.local_nranks = nranks_per_node
     strategy.trainer_endpoints = parallel_env.trainer_endpoints
     strategy.current_endpoint = parallel_env.current_endpoint
     strategy.nrings = parallel_env.nrings
