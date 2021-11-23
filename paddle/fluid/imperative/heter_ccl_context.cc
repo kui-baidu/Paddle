@@ -61,7 +61,7 @@ HeterParallelContext::HeterParallelContext(const ParallelStrategy &strategy,
   for (auto ep : all_eps) {
     std::string ip = ep.substr(0, ep.find(':'));
     // record ip of different nodes
-    if (nodes_ips.find(ip) != nodes_ips.end()) {
+    if (nodes_ips.find(ip) == nodes_ips.end()) {
       if (ep == strategy_.current_endpoint_) {
         inter_rank = nodes_ips.size();
       }
@@ -161,6 +161,10 @@ void HeterParallelContext::AllReduceByStream(const framework::Variable &src,
   VLOG(3) << "/// DEBUG /// step 3: broadcast within node... ";
   node_parallel_ctx_->BroadCast(dst, ring_id);
   node_parallel_ctx_->WaitComm(ring_id);
+}
+
+void HeterParallelContext::BroadCast(framework::Variable *src, int ring_id) {
+  PADDLE_THROW(platform::errors::Unimplemented("Unimplemented function."));
 }
 
 paddle::platform::DeviceContext *HeterParallelContext::GetDeviceContext(
