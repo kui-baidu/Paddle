@@ -141,18 +141,20 @@ void HeterParallelContext::AllReduceByStream(const framework::Variable &src,
 
   // step 2: call allreduce between nodes with gloo
   if (inter_parallel_ctx_ != nullptr) {
+    // copy src to cpu
     auto src_tensor = src.Get<framework::LoDTensor>();
     framework::Variable src_cpu;
     auto src_cpu_tensor = src_cpu.GetMutable<framework::LoDTensor>();
     framework::TensorCopySync(src_tensor, platform::CPUPlace(), src_cpu_tensor);
 
+    // allreduce src/cpu to dst/cpu
     framework::Variable dst_cpu;
-    inter_parallel_ctx_->AllReduceByStream(src, &dst_cpu, ring_id, false);
+    inter_parallel_ctx_->AllReduceByStream(src_cpu, &dst_cpu, ring_id, false);
 
+    // copy dst/cpu to dst
     auto dst_cpu_tensor = dst_cpu.Get<framework::LoDTensor>();
     auto dst_tensor = dst->GetMutable<framework::LoDTensor>();
-    framework::TensorCopySync(dst_cpu_tensor, src_cpu_tensor->place(),
-                              dst_tensor);
+    framework::TensorCopySync(dst_cpu_tensor, dst_tensor->place(), dst_tensor);
 
     inter_parallel_ctx_->WaitComm(ring_id);
   }
