@@ -60,4 +60,29 @@ def rewrite_host_ip(ctx):
         ctx.node.ip = ctx.args.host
 
 
-enabled_plugins = [collective_compatible, rewrite_host_ip, process_args]
+def rewrite_hostfile_args(ctx):
+    if ctx.args.hostfile:
+        try:
+            with open(ctx.args.hostfile, 'r') as f:
+                lines = f.readlines()
+                hosts = [
+                    line.split()[0].strip() for line in lines
+                    if not line.startswith('#') and line.strip() != ''
+                ]
+                ctx.args.node_hosts = ",".join(hosts)
+        except Exception as e:
+            ctx.logger.error(f"read hostfile {ctx.args.hostfile} faied {e}")
+
+    if ctx.args.node_hosts:
+        nn = 1 if ':' in ctx.args.nnodes else int(ctx.args.nnodes)
+        nh = len(ctx.args.node_hosts.split(','))
+        if nn > 1:
+            assert ctx.args.nnodes == nh, 'nnodes {} should equals to len(node_hosts)'.format(
+                ctx.args.nnodes)
+        elif ctx.args.nnodes == '1':
+            ctx.args.nnodes = nh
+
+
+enabled_plugins = [
+    rewrite_hostfile_args, collective_compatible, rewrite_host_ip, process_args
+]

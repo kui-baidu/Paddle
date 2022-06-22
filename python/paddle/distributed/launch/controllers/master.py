@@ -21,6 +21,7 @@ import six
 import threading
 import copy
 import random
+import subprocess
 
 ETCD_PROTOCAL = 'etcd://'
 
@@ -40,6 +41,8 @@ class Master(object):
         self.initialized = False
         self.endpoint = None
 
+        self.nodes_proc = {}
+
     def stop(self):
         raise NotImplementedError
 
@@ -55,6 +58,13 @@ class Master(object):
     def sync_peers(self, prefix, key, value, size, rank=-1) -> (list, int):
         raise NotImplementedError
 
+    @property
+    def command(self):
+        cmd = [sys.executable.split('/')[-1], "-m", "paddle.distributed.launch"]
+        cmd.extend(["--master", self.endpoint])
+        cmd.extend(sys.argv[1:])
+        return cmd
+
     @classmethod
     def factory(cls, ctx):
         if ctx.args.master and ctx.args.master.startswith(ETCD_PROTOCAL):
@@ -64,6 +74,33 @@ class Master(object):
 
 
 class HTTPMaster(Master):
+
+    def command_deliver(self):
+        if not self.ctx.args.node_hosts:
+            return False
+
+        remote_hosts = self.ctx.args.node_hosts.split(',')
+        for hs in remote_hosts:
+            hs = hs.split(':')[0] if ':' in hs else hs
+            if hs in ['127.0.0.1', self.ctx.node.ip]:
+                continue
+
+            command = 'for i in {1..100}; do echo $i; sleep 2; done'
+            self.nodes_proc[hs] = subprocess.Popen(f"ssh {hs} '{command}'",
+                                                   shell=True,
+                                                   stdout=subprocess.PIPE,
+                                                   stderr=subprocess.PIPE)
+            for h, proc in self.nodes_proc.items():
+                if proc.poll() is not None:
+                    _, errs = pc.communicate(timeout=1)
+                    self.ctx.logger.error(
+                        f"launch on host {h} failed {proc.returncode} error {errs}"
+                    )
+                    return False
+                else:
+                    self.ctx.logger.info(f"launch on host {h} success")
+
+        return True
 
     def lazy_init(self):
         if self.initialized:
@@ -86,21 +123,20 @@ class HTTPMaster(Master):
                             "start master failed {}".format(e))
                         time.sleep(0.1)
                         continue
+
+                self.command_deliver()
+
         else:
             port = self.ctx.node.get_free_port()
             self.endpoint = "{}:{}".format(self.ctx.node.ip, port)
             self.server = KVServer(port)
             self.role = Master.MAIN
 
-            print("Copy the following command to other nodes to run.")
-            cmd = [
-                sys.executable.split('/')[-1], "-m", "paddle.distributed.launch"
-            ]
-            cmd.extend(["--master", self.endpoint])
-            cmd.extend(sys.argv[1:])
-            print("-" * 80)
-            print(" ".join(cmd))
-            print("-" * 80)
+            if not self.command_deliver():
+                print("Copy the following command to other nodes to run.")
+                print("-" * 80)
+                print(" ".join(self.command))
+                print("-" * 80)
 
             if self.ctx.args.rank >= 0:
                 self.ctx.logger.warning(
@@ -125,6 +161,11 @@ class HTTPMaster(Master):
             self.ctx.logger.debug("KV server stopped")
 
     def stop(self):
+        for h, proc in self.nodes_proc.items():
+            if proc.poll() is None:
+                proc.terminate()
+                self.ctx.logger.info(f"Stop remote process on {h}")
+
         self._stop_server()
 
     def sync_peers(self, prefix, key, value, size, rank=-1) -> (list, int):

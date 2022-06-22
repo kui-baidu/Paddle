@@ -108,9 +108,22 @@ def parse_args():
                             "followed by arguments for the "
                             "training script")
 
+    # launch for remote nodes
+    base_group.add_argument("--hostfile",
+                            type=str,
+                            default=None,
+                            help="filename that lists hosts on which to launch")
+
+    base_group.add_argument(
+        "--node_hosts",
+        type=str,
+        default=None,
+        help="host ips on which to launch, e.g. 123.45.67.89,123.45.67.98")
+
     base_group.add_argument('training_script_args', nargs=REMAINDER)
 
     ps_group = parser.add_argument_group("Parameter-Server Parameters")
+
     # for parameter server
     ps_group.add_argument("--servers",
                           type=str,

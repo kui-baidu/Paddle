@@ -49,6 +49,8 @@ class ControllerBase(object):
                        jid=self.ctx.args.job_id)
         self.pod = Pod()
 
+        self.ctx.set_envs({"POD_NMAE": self.pod.name})
+
         self.join_server = None
 
     def deploy_pod(self):
