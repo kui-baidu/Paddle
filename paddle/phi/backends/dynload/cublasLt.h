@@ -58,6 +58,9 @@ extern void *cublasLt_dso_handle;
   __macro(cublasLtCreate);                          \
   __macro(cublasLtDestroy);                         \
   __macro(cublasLtMatmul);                          \
+  __macro(cublasLtMatmulDescInit);                          \
+  __macro(cublasLtMatrixLayoutInit);                          \
+  __macro(cublasLtMatmulPreferenceInit);                          \
   __macro(cublasLtMatmulDescCreate);                \
   __macro(cublasLtMatmulDescDestroy);               \
   __macro(cublasLtMatmulDescSetAttribute);          \

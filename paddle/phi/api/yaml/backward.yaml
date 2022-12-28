@@ -1312,3 +1312,13 @@
   kernel :
     func : where_grad
   no_need_buffer : x, y
+
+- backward_op : linear_bias_grad
+  forward : linear_bias (Tensor input, Tensor weight, Tensor bias) -> Tensor(out)
+  args : (Tensor input, Tensor weight, Tensor bias, Tensor out_grad)
+  output : Tensor(input_grad), Tensor(weight_grad), Tensor(bias_grad)
+  infer_meta :
+    func : LinearBiasGradInferMeta
+    param : [input, weight, bias]
+  kernel :
+    func : linear_bias_grad

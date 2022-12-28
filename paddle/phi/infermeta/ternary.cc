@@ -1290,4 +1290,35 @@ void ViterbiDecodeInferMeta(const MetaTensor& input,
   scores->set_dtype(length.dtype());
 }
 
+void LinearBiasInferMeta(const MetaTensor& input,
+                    const MetaTensor& weight,
+                    const MetaTensor& bias,
+                    MetaTensor* out) {
+  std::vector<int64_t> dims_x = phi::vectorize(input.dims());
+  std::vector<int64_t> dims_y = phi::vectorize(weight.dims());
+  std::vector<int64_t> new_dims{dims_x[0], dims_y[0]};
+  auto ddim_out = phi::make_ddim(new_dims);
+
+  out->set_dims(ddim_out);
+  out->set_dtype(input.dtype());
+  out->set_layout(input.layout());
+}
+
+void LinearBiasGradInferMeta(const MetaTensor& input,
+                    const MetaTensor& weight,
+                    const MetaTensor& bias,
+                    MetaTensor* input_grad,
+                    MetaTensor* weight_grad,
+                    MetaTensor* bias_grad) {
+  if (input_grad) {
+    input_grad->share_meta(input);
+  }
+  if (weight_grad && weight) {
+    weight_grad->share_meta(weight);
+  }
+  if (bias_grad && bias) {
+    bias_grad->share_meta(bias);
+  }
+}
+
 }  // namespace phi

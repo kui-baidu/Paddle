@@ -202,4 +202,15 @@ void ViterbiDecodeInferMeta(const MetaTensor& input,
                             MetaTensor* path,
                             MetaConfig config = MetaConfig());
 
+void LinearBiasInferMeta(const MetaTensor& input,
+                    const MetaTensor& weight,
+                    const MetaTensor& bias,
+                    MetaTensor* out);
+
+void LinearBiasGradInferMeta(const MetaTensor& input,
+                    const MetaTensor& weight,
+                    const MetaTensor& bias,
+                    MetaTensor* input_grad,
+                    MetaTensor* weight_grad,
+                    MetaTensor* bias_grad);
 }  // namespace phi

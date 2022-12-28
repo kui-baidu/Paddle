@@ -1138,3 +1138,12 @@
   kernel :
     func : where
   backward : where_grad
+
+- op : linear_bias
+  args : (Tensor input, Tensor weight, Tensor bias)
+  output : Tensor
+  infer_meta :
+    func : LinearBiasInferMeta
+  kernel :
+    func : linear_bias
+  backward : linear_bias_grad
