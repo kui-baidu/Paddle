@@ -114,7 +114,7 @@
     param : [out]
   kernel :
     func : erfinv_grad
-    
+
 - backward_op : fft_c2c_grad
   forward: fft_c2c(Tensor x, int64_t[] axes, str normalization, bool forward) -> Tensor(out)
   args : (Tensor out_grad, int64_t[] axes, str normalization, bool forward)
@@ -146,6 +146,16 @@
     func : fft_r2c_grad
     data_type: out_grad
   no_need_buffer: x
+
+- backward_op : flash_attn_grad
+  forward : flash_attn (Tensor q, Tensor k, Tensor v, float dropout = 0.0, bool causal = false, bool return_softmax = false) -> Tensor(out), Tensor(softmax_lse), Tensor(softmax), Tensor(seed_offset)
+  args : (Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor seed_offset, Tensor out_grad, float dropout = 0.0, bool causal = false)
+  output : Tensor(q_grad), Tensor(k_grad), Tensor(v_grad)
+  infer_meta :
+    func : FlashAttnGradInferMeta
+    param : [q, k, v]
+  kernel :
+    func : flash_attn_grad
 
 - backward_op : flip_grad
   forward : flip (Tensor x, int[] axis) -> Tensor(out)

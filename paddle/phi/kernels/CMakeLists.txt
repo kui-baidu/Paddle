@@ -79,6 +79,10 @@ set(COMMON_KERNEL_DEPS
     utf8proc
     device_memory_aligment)
 
+if(WITH_FLASHATTN)
+  set(COMMON_KERNEL_DEPS ${COMMON_KERNEL_DEPS} phi_dynload_flashattn)
+endif()
+
 set(COMMON_KERNEL_DEPS ${COMMON_KERNEL_DEPS} processgroup)
 if(WITH_NCCL OR WITH_RCCL)
   set(COMMON_KERNEL_DEPS ${COMMON_KERNEL_DEPS} processgroup_nccl)

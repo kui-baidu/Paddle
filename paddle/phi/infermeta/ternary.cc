@@ -1289,4 +1289,33 @@ void ViterbiDecodeInferMeta(const MetaTensor& input,
   scores->set_dtype(length.dtype());
 }
 
+void FlashAttnInferMeta(const MetaTensor& q,
+                        const MetaTensor& k,
+                        const MetaTensor& v,
+                        MetaTensor* out,
+                        MetaTensor* softmax_lse,
+                        MetaTensor* softmax,
+                        MetaTensor* seed_offset) {
+  out->set_dims(q.dims());
+  out->set_dtype(q.dtype());
+  out->set_layout(q.layout());
+}
+
+void FlashAttnGradInferMeta(const MetaTensor& q,
+                            const MetaTensor& k,
+                            const MetaTensor& v,
+                            MetaTensor* dq,
+                            MetaTensor* dk,
+                            MetaTensor* dv) {
+  if (dq) {
+    dq->share_meta(q);
+  }
+  if (dk && k) {
+    dk->share_meta(k);
+  }
+  if (dv && v) {
+    dv->share_meta(v);
+  }
+}
+
 }  // namespace phi
