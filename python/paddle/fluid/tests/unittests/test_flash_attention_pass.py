@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import re
 import unittest
 
 import numpy as np
@@ -21,118 +23,85 @@ import paddle.fluid.core as core
 import paddle.nn.functional as F
 from paddle.distributed.passes import PassManager, new_pass
 
-paddle.enable_static()
+
+def get_cuda_version():
+    result = os.popen("nvcc --version").read()
+    regex = r'release (\S+),'
+    match = re.search(regex, result)
+    if match:
+        num = str(match.group(1))
+        integer, decimal = num.split('.')
+        return int(integer) * 1000 + int(float(decimal) * 10)
+    else:
+        return -1
 
 
-class MultiHeadAttention(paddle.nn.Layer):
-    def __init__(
-        self,
-        head_dim,
-        num_heads,
-        add_residual=True,
-        attn_dropout=True,
-    ):
-        super(MultiHeadAttention, self).__init__()
-        self.head_dim = head_dim
-        self.kdim = head_dim
-        self.vdim = head_dim
-        self.num_heads = num_heads
+def nn(qkv, causal=False, dropout_prob=0.0):
+    qkv = paddle.transpose(qkv, [0, 2, 1, 3])
+    qt, kt, vt = paddle.split(qkv, num_or_sections=3, axis=-1)
 
-        self.add_residual = add_residual
-        self.attn_dropout = attn_dropout
-
-        self.head_dim = head_dim // num_heads
-
-        self.norm1 = paddle.nn.LayerNorm(head_dim, epsilon=1e-5)
-        self.norm2 = paddle.nn.LayerNorm(head_dim, epsilon=1e-5)
-
-        self.qkv_proj = paddle.nn.Linear(head_dim, 3 * head_dim)
-        self.out_proj = paddle.nn.Linear(head_dim, head_dim)
-        self.dropout = paddle.nn.Dropout(1e-10, mode="upscale_in_train")
-
-    def forward(self, x, causal=False):
-        residual = x
-
-        # compute qkv
-        qkv = self.qkv_proj(x)
-        qkv = paddle.reshape(qkv, [0, 0, 3 * self.num_heads, self.head_dim])
-        qkv = paddle.transpose(qkv, [0, 2, 1, 3])
-        q, k, v = paddle.split(qkv, num_or_sections=3, axis=1)
-
-        # compute core attention
-        k = paddle.scale(k, scale=self.head_dim**-0.5)
-        product = paddle.matmul(x=q, y=k, transpose_y=True)
-        # product = paddle.scale(product, scale=self.head_dim**-0.5)
-
-        if causal:
-            weights = paddle.incubate.softmax_mask_fuse_upper_triangle(product)
-        else:
-            weights = F.softmax(product)
-
-        if self.attn_dropout:
-            weights = F.dropout(
-                weights, 0.1, training=self.training, mode="upscale_in_train"
-            )
-        out = paddle.matmul(weights, v)
-        out = paddle.transpose(out, perm=[0, 2, 1, 3])
-        out = paddle.reshape(x=out, shape=[0, 0, out.shape[2] * out.shape[3]])
-
-        # project to output
-        out = self.out_proj(out)
-        out = self.dropout(out)
-        if self.add_residual:
-            out = residual + out
-
-        return out
+    scale = 1.0 / np.sqrt(qt.shape[-1])
+    s = paddle.matmul(qt, kt, transpose_y=True)
+    s = paddle.scale(s, scale)
+    p = (
+        paddle.incubate.softmax_mask_fuse_upper_triangle(s)
+        if causal
+        else F.softmax(s)
+    )
+    if dropout_prob > 0:
+        p = paddle.nn.functional.dropout(p, dropout_prob)
+    o = paddle.matmul(p, vt)
+    o = paddle.transpose(o, [0, 2, 1, 3])
+    o = paddle.reshape(o, [0, 0, o.shape[2] * o.shape[3]])
+    return o
 
 
 @unittest.skipIf(
-    not core.is_compiled_with_cuda(), "core is not compiled with CUDA"
+    not core.is_compiled_with_cuda() or get_cuda_version() < 11030,
+    "core is not compiled with CUDA and cuda version need larger than or equal to 11.3",
 )
 class TestFlashAttentionPass(unittest.TestCase):
     def setUp(self):
-        self.add_residual = True
-        self.attn_dropout = True
-        self.add_mask = True
-
-        self.batch_size = 2
-        self.seq_len = 1024
-        self.hidden_size = 768
-        self.num_heads = 12
-        self.head_dim = 128
-
         self.place = paddle.CUDAPlace(0)
-        self.dtype = 'float'
+        self.num_head = 8
+        self.head_dim = 8
+        self.bs = 2
+        self.seq_len = 128
+
+        self.shape = (self.bs, self.seq_len, self.num_head * self.head_dim * 3)
+        self.dtype = 'float16'
+        self.causal = True
+        self.dropout = 0.1
 
     def test_pass(self):
-        out_ref = self.run_program(apply_pass=False)
-        print(out_ref)
-        # out_pass = self.run_program(apply_pass=True)
-        # print(out_pass)
+        data = np.random.random(self.shape)
 
-    def run_program(self, apply_pass=False):
-        x_data = np.random.random([self.batch_size, self.seq_len, self.seq_len])
+        out_ref = self.run_program(data, apply_pass=False)
+        print(out_ref)
+        out_pass = self.run_program(data, apply_pass=True)
+        print(out_pass)
+        '''
+        np.testing.assert_allclose(
+            fetches_result[0], out_, rtol=5e-03, atol=1e-03
+        )
+        '''
+
+    def run_program(self, data, apply_pass=False):
+
+        # test static
+        paddle.enable_static()
 
         main_prog = paddle.static.Program()
         startup_prog = paddle.static.Program()
 
         with paddle.static.program_guard(main_prog, startup_prog):
-            data = paddle.static.data(
-                name="x",
-                shape=[-1, self.seq_len, self.seq_len],
-                dtype=self.dtype,
+            qkv = paddle.static.data(
+                name="qkv", shape=self.shape, dtype=self.dtype
             )
 
-            data_linear = paddle.nn.Linear(self.seq_len, self.hidden_size)
-            attn_input = data_linear(data)
-
-            multi_head_attn = MultiHeadAttention(
-                self.hidden_size,
-                self.num_heads,
-                add_residual=self.add_residual,
-                attn_dropout=self.attn_dropout,
-            )
-            out = multi_head_attn(attn_input, causal=True)
+            qkv = paddle.reshape(qkv, [0, 0, self.num_head, 3 * self.head_dim])
+            out = nn(qkv, self.causal, self.dropout)
+            out = paddle.reshape(out, [-1])
             loss = paddle.mean(out)
 
             # sgd_optimizer = paddle.fluid.optimizer.SGD(learning_rate=0.001)
@@ -145,19 +114,34 @@ class TestFlashAttentionPass(unittest.TestCase):
                 ops = main_prog.global_block().ops
                 assert "flash_attn" in [op.type for op in ops]
 
-            exe = paddle.static.Executor(paddle.CUDAPlace(0))
+            exe = paddle.static.Executor(self.place)
             exe.run(startup_prog)
 
             ret_loss = exe.run(
                 main_prog,
-                feed={"x": x_data.astype('float')},
-                fetch_list=[loss.name],
+                feed={
+                    "qkv": data.astype('float16'),
+                },
+                fetch_list=[out.name],
             )
 
             print(main_prog)
             return ret_loss
 
 
-if __name__ == "__main__":
-    np.random.seed(0)
+class TestFlashAttentionPass1(TestFlashAttentionPass):
+    def setUp(self):
+        self.place = paddle.CUDAPlace(0)
+        self.num_head = 8
+        self.head_dim = 8
+        self.bs = 2
+        self.seq_len = 64
+
+        self.shape = (self.bs, self.seq_len, self.num_head * self.head_dim * 3)
+        self.dtype = 'float16'
+        self.causal = True
+        self.dropout = 0.1
+
+
+if __name__ == '__main__':
     unittest.main()
