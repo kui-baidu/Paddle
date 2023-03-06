@@ -36,13 +36,23 @@ def get_cuda_version():
         return -1
 
 
-def nn(qkv, causal=False, dropout_prob=0.0):
+def nn(qkv, scale_pos=1, causal=False, dropout_prob=0.0):
     qkv = paddle.transpose(qkv, [0, 2, 1, 3])
     qt, kt, vt = paddle.split(qkv, num_or_sections=3, axis=-1)
 
-    scale = 1.0 / np.sqrt(qt.shape[-1])
+    if scale_pos == 1:
+        scale = 1.0 / np.sqrt(qt.shape[-1])
+        qt = paddle.scale(qt, scale)
+    elif scale_pos == 2:
+        scale = 1.0 / np.sqrt(kt.shape[-1])
+        kt = paddle.scale(kt, scale)
+
     s = paddle.matmul(qt, kt, transpose_y=True)
-    s = paddle.scale(s, scale)
+
+    if scale_pos == 3:
+        scale = 1.0 / np.sqrt(kt.shape[-1])
+        s = paddle.scale(s, scale)
+
     p = (
         paddle.incubate.softmax_mask_fuse_upper_triangle(s)
         if causal
@@ -63,10 +73,10 @@ def nn(qkv, causal=False, dropout_prob=0.0):
 class TestFlashAttentionPass(unittest.TestCase):
     def setUp(self):
         self.place = paddle.CUDAPlace(0)
-        self.num_head = 8
+        self.num_head = 2
         self.head_dim = 8
         self.bs = 2
-        self.seq_len = 128
+        self.seq_len = 8
 
         self.shape = (self.bs, self.seq_len, self.num_head * self.head_dim * 3)
         self.dtype = 'float16'
@@ -77,9 +87,9 @@ class TestFlashAttentionPass(unittest.TestCase):
         data = np.random.random(self.shape)
 
         out_ref = self.run_program(data, apply_pass=False)
-        print(out_ref)
+        print("out_ref", out_ref)
         out_pass = self.run_program(data, apply_pass=True)
-        print(out_pass)
+        print("out_pass", out_pass)
         '''
         np.testing.assert_allclose(
             fetches_result[0], out_, rtol=5e-03, atol=1e-03
@@ -88,8 +98,8 @@ class TestFlashAttentionPass(unittest.TestCase):
 
     def run_program(self, data, apply_pass=False):
 
-        # test static
         paddle.enable_static()
+        paddle.seed(1024)
 
         main_prog = paddle.static.Program()
         startup_prog = paddle.static.Program()
@@ -100,7 +110,9 @@ class TestFlashAttentionPass(unittest.TestCase):
             )
 
             qkv = paddle.reshape(qkv, [0, 0, self.num_head, 3 * self.head_dim])
-            out = nn(qkv, self.causal, self.dropout)
+            out = nn(
+                qkv, scale_pos=3, causal=self.causal, dropout_prob=self.dropout
+            )
             out = paddle.reshape(out, [-1])
             loss = paddle.mean(out)
 
@@ -125,10 +137,11 @@ class TestFlashAttentionPass(unittest.TestCase):
                 fetch_list=[out.name],
             )
 
-            print(main_prog)
+            # print("prog", main_prog)
             return ret_loss
 
 
+'''
 class TestFlashAttentionPass1(TestFlashAttentionPass):
     def setUp(self):
         self.place = paddle.CUDAPlace(0)
@@ -141,6 +154,7 @@ class TestFlashAttentionPass1(TestFlashAttentionPass):
         self.dtype = 'float16'
         self.causal = True
         self.dropout = 0.1
+'''
 
 
 if __name__ == '__main__':

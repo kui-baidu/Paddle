@@ -355,8 +355,11 @@ void FlashAttentionsPass::ApplyImpl(Graph* graph) const {
   graph = FlashAttentionFwd(graph, 1, true, false, true);
   graph = FlashAttentionBwd(graph, 1, true, false, true);
 
-  graph = FlashAttentionFwd(graph, 2, true, true, true);  // gpt
+  graph = FlashAttentionFwd(graph, 2, true, true, true);
   graph = FlashAttentionBwd(graph, 2, true, true, true);
+
+  graph = FlashAttentionFwd(graph, 3, true, true, true);  // gpt
+  graph = FlashAttentionBwd(graph, 3, true, true, true);
 }
 
 ir::Graph* FlashAttentionsPass::FlashAttentionFwd(Graph* graph,
@@ -384,10 +387,12 @@ ir::Graph* FlashAttentionsPass::FlashAttentionFwd(Graph* graph,
             << is_causal << is_dropout;
 
     // only available for fp16 and bf16
+    /*
     if (subgraph.at(x)->Var()->GetDataType() != proto::VarType::FP16 &&
         subgraph.at(x)->Var()->GetDataType() != proto::VarType::BF16) {
       return;
     }
+    */
 
     GET_IR_NODE_FROM_SUBGRAPH(q_transpose_out, q_transpose_out, fap);
     GET_IR_NODE_FROM_SUBGRAPH(k_transpose_out, k_transpose_out, fap);
@@ -540,10 +545,12 @@ ir::Graph* FlashAttentionsPass::FlashAttentionBwd(Graph* graph,
             << is_causal << is_dropout;
 
     // only available for fp16 and bf16
+    /*
     if (subgraph.at(x)->Var()->GetDataType() != proto::VarType::FP16 &&
         subgraph.at(x)->Var()->GetDataType() != proto::VarType::BF16) {
       return;
     }
+    */
 
     GET_IR_NODE_FROM_SUBGRAPH(
         qkv_transpose_grad_op, qkv_transpose_grad_op, fagp);
