@@ -20,7 +20,10 @@
 #include "paddle/phi/core/tensor_utils.h"
 
 #include "paddle/phi/kernels/arange_kernel.h"
+#include "paddle/phi/kernels/cum_kernel.h"
 #include "paddle/phi/kernels/empty_kernel.h"
+#include "paddle/phi/kernels/index_select_kernel.h"
+#include "paddle/phi/kernels/reduce_sum_kernel.h"
 #include "paddle/phi/kernels/reshape_kernel.h"
 
 #ifdef PADDLE_WITH_FLASHATTN
@@ -30,10 +33,23 @@
 namespace phi {
 
 template <typename T, typename Context>
+void cumLens(const Context& ctx,
+             const DenseTensor& mask,
+             DenseTensor* cu_seqlens) {
+  DenseTensor seq_lens = Sum<T, Context>(ctx, mask, -1, DataType::INT32, false);
+  DenseTensor cu_lens;
+  CumsumKernel<T, Context>(ctx, seq_lens, -1, false, false, false, &cu_lens);
+  DenseTensor p0 = Full<T, Context>(ctx, IntArray({1}), 0);
+  ConcatKernel<T, Context>(ctx, {p0, cu_lens}, 0, cu_seqlens);
+}
+
+template <typename T, typename Context>
 void FlashAttnKernel(const Context& ctx,
                      const DenseTensor& q,
                      const DenseTensor& k,
                      const DenseTensor& v,
+                     const paddle::optional<DenseTensor>& q_padding_mask,
+                     const paddle::optional<DenseTensor>& k_padding_mask,
                      float dropout,
                      bool causal,
                      bool return_softmax,
@@ -57,24 +73,57 @@ void FlashAttnKernel(const Context& ctx,
 
   int64_t seq_len_k = k.dims()[1];
 
-  int64_t total_q = batch_size * seq_len_q;
-  int64_t total_k = batch_size * seq_len_k;
-
-  DenseTensor q_t_s =
-      Reshape<T, Context>(ctx, q, {total_q, num_heads, head_size});
-  DenseTensor k_t_s =
-      Reshape<T, Context>(ctx, k, {total_k, num_heads, head_size});
-  DenseTensor v_t_s =
-      Reshape<T, Context>(ctx, v, {total_k, num_heads, head_size});
-
-  // q,k,v [total_*, num_heads, head_dim]
-
   DenseTensor cu_seqlens_q;
   DenseTensor cu_seqlens_k;
-  ArangeNullaryKernel<int32_t, Context>(
-      ctx, 0, (batch_size + 1) * seq_len_q, seq_len_q, &cu_seqlens_q);
-  ArangeNullaryKernel<int32_t, Context>(
-      ctx, 0, (batch_size + 1) * seq_len_k, seq_len_k, &cu_seqlens_k);
+
+  DenseTensor q_tensor;
+  DenseTensor k_tensor;
+  DenseTensor v_tensor;
+
+  DenseTensor q_indexes;
+  DenseTensor kv_indexes;
+
+  int64_t total_q;
+  int64_t total_k;
+
+  // q,k,v [total_*, num_heads, head_dim]
+  if (q_padding_mask.get_ptr()) {
+    NonZeroKernel<T, Context>(ctx, q_padding_mask, &q_indexes);
+    NonZeroKernel<T, Context>(ctx, k_padding_mask, &kv_indexes);
+
+    total_q = q_indexes.numel();
+    total_k = kv_indexes.numel();
+
+    cumLens<int32_t, Context>(ctx, q_padding_mask, &cu_seqlens_q);
+    cumLens<int32_t, Context>(ctx, k_padding_mask, &cu_seqlens_k);
+
+    DenseTensor q_reshape = Reshape<T, Context>(
+        ctx, q, {batch_size * seq_len_q, num_heads, head_size});
+    DenseTensor k_reshape = Reshape<T, Context>(
+        ctx, k, {batch_size * seq_len_k, num_heads, head_size});
+    DenseTensor v_reshape = Reshape<T, Context>(
+        ctx, v, {batch_size * seq_len_k, num_heads, head_size});
+
+    q_tensor->Resize({total_q, num_heads, head_size});
+    k_tensor->Resize({total_k, num_heads, head_size});
+    v_tensor->Resize({total_k, num_heads, head_size});
+    IndexSelectKernel<T, Context>(ctx, q_reshape, q_indexes, 0, &q_tensor);
+    IndexSelectKernel<T, Context>(ctx, k_reshape, kv_indexes, 0, &k_tensor);
+    IndexSelectKernel<T, Context>(ctx, v_reshape, kv_indexes, 0, &v_tensor);
+
+  } else {
+    total_q = batch_size * seq_len_q;
+    total_k = batch_size * seq_len_k;
+
+    q_tensor = Reshape<T, Context>(ctx, q, {total_q, num_heads, head_size});
+    k_tensor = Reshape<T, Context>(ctx, k, {total_k, num_heads, head_size});
+    v_tensor = Reshape<T, Context>(ctx, v, {total_k, num_heads, head_size});
+
+    ArangeNullaryKernel<int32_t, Context>(
+        ctx, 0, (batch_size + 1) * seq_len_q, seq_len_q, &cu_seqlens_q);
+    ArangeNullaryKernel<int32_t, Context>(
+        ctx, 0, (batch_size + 1) * seq_len_k, seq_len_k, &cu_seqlens_k);
+  }
 
   float scale = 1.0f / std::sqrt(head_size);
   int num_splits = 0;  // 0 for an internal heuristic, which is optimal
@@ -107,9 +156,9 @@ void FlashAttnKernel(const Context& ctx,
 
   // calculate workspace size before execution
   bool succ =
-      phi::dynload::flash_attn_fwd(q_t_s.data(),
-                                   k_t_s.data(),
-                                   v_t_s.data(),
+      phi::dynload::flash_attn_fwd(q_tensor.data(),
+                                   k_tensor.data(),
+                                   v_tensor.data(),
                                    nullptr,  // for calculation workspace size
                                    cu_seqlens_q.data(),
                                    cu_seqlens_k.data(),
@@ -144,9 +193,9 @@ void FlashAttnKernel(const Context& ctx,
   }
 
   succ = phi::dynload::flash_attn_fwd(
-      q_t_s.data(),
-      k_t_s.data(),
-      v_t_s.data(),
+      q_tensor.data(),
+      k_tensor.data(),
+      v_tensor.data(),
       out->data(),
       cu_seqlens_q.data(),
       cu_seqlens_k.data(),
@@ -173,6 +222,10 @@ void FlashAttnKernel(const Context& ctx,
 
   if (!succ) {
     PADDLE_THROW(phi::errors::External(phi::dynload::flash_attn_error()));
+  }
+
+  if (q_padding_mask.get_ptr()) {
+    ScatterAssign<T, int>(ctx, *out, );
   }
 
 #endif
